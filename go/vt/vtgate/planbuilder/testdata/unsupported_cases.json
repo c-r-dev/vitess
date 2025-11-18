@@ -401,17 +401,17 @@
   },
   {
     "comment": "Window function PARTITION BY non-sharding key in multi-shard query",
-    "query": "SELECT id, name, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) as rn FROM user",
+    "query": "SELECT id, textcol1, ROW_NUMBER() OVER (PARTITION BY textcol1 ORDER BY id) as rn FROM user",
     "plan": "VT12001: unsupported: OVER CLAUSE with sharded keyspace"
   },
   {
     "comment": "Window function PARTITION BY non-sharding key with WHERE clause",
-    "query": "SELECT id, val, RANK() OVER (PARTITION BY val ORDER BY id) as rnk FROM user WHERE id IN (1,2) ",
+    "query": "SELECT id, intcol, RANK() OVER (PARTITION BY intcol ORDER BY id) as rnk FROM user WHERE id IN (1,2) ",
     "plan": "VT12001: unsupported: window function PARTITION BY must include the sharding key 'Id' for multi-shard queries"
   },
   {
     "comment": "UNION ALL with window function where one branch has invalid partition",
-    "query": "SELECT id, name, ROW_NUMBER() OVER (PARTITION BY id ORDER BY name) as rn FROM user WHERE id = 1 UNION ALL SELECT id, name, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) as rn FROM user WHERE name = 'test'",
+    "query": "SELECT id, textcol1, ROW_NUMBER() OVER (PARTITION BY id ORDER BY textcol1) as rn FROM user WHERE id = 1 UNION ALL SELECT id, textcol1, ROW_NUMBER() OVER (PARTITION BY textcol1 ORDER BY id) as rn FROM user WHERE textcol1 = 'test'",
     "plan": "VT12001: unsupported: OVER CLAUSE with sharded keyspace"
   }
 ]

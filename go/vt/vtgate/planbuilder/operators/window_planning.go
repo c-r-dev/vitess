@@ -33,23 +33,19 @@ func hasWindowFunctions(ctx *plancontext.PlanningContext) bool {
 		return false
 	}
 
-	for _, selectExpr := range stmt.SelectExprs.Exprs {
-		var hasWindow bool
-		err := sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-			if _, ok := node.(*sqlparser.OverClause); ok {
-				hasWindow = true
-				return false, nil
-			}
-			return true, nil
-		}, selectExpr)
-		if err != nil {
-			return false
+	// Check if there's any OverClause in the entire statement
+	var hasWindow bool
+	err := sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+		if _, ok := node.(*sqlparser.OverClause); ok {
+			hasWindow = true
+			return false, nil
 		}
-		if hasWindow {
-			return true
-		}
+		return true, nil
+	}, stmt)
+	if err != nil {
+		return false
 	}
-	return false
+	return hasWindow
 }
 
 // validateWindowFunctionsForMultiShard validates window functions for multi-shard operations
@@ -86,12 +82,15 @@ func canExecuteWindowsOnRoute(route *Route) bool {
 	}
 
 	opCode := route.Routing.OpCode()
-	if opCode != engine.IN && opCode != engine.EqualUnique {
-		return false
+	// Allow window functions for specific opcodes that can handle them
+	if opCode == engine.IN || opCode == engine.EqualUnique || opCode == engine.Unsharded ||
+		opCode == engine.None || opCode == engine.DBA {
+		return true
 	}
 
 	shardedRouting, ok := route.Routing.(*ShardedRouting)
 	if !ok {
+		// For other non-ShardedRouting types, window functions are not allowed
 		return false
 	}
 
