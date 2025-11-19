@@ -6306,5 +6306,32 @@
         "user.user"
       ]
     }
+  },
+  {
+    "comment": "Window function with composite vindex (multi-column) - PARTITION BY includes all sharding key columns",
+    "query": "SELECT cola, colb, column_c, RANK() OVER (PARTITION BY cola, colb ORDER BY column_c) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
+    "plan": {
+      "Type": "Passthrough",
+      "QueryType": "SELECT",
+      "Original": "SELECT cola, colb, column_c, RANK() OVER (PARTITION BY cola, colb ORDER BY column_c) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
+      "Instructions": {
+        "OperatorType": "Route",
+        "Variant": "EqualUnique",
+        "Keyspace": {
+          "Name": "user",
+          "Sharded": true
+        },
+        "FieldQuery": "select cola, colb, column_c, rank() over ( partition by cola, colb order by column_c asc) as rnk from multicol_tbl where 1 != 1",
+        "Query": "select cola, colb, column_c, rank() over ( partition by cola, colb order by column_c asc) as rnk from multicol_tbl where cola = 'A' and colb = 'B'",
+        "Values": [
+          "'A'",
+          "'B'"
+        ],
+        "Vindex": "multicolIdx"
+      },
+      "TablesUsed": [
+        "user.multicol_tbl"
+      ]
+    }
   }
 ]

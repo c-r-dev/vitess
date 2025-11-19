@@ -19,6 +19,7 @@ package operators
 import (
 	"strings"
 
+	"vitess.io/vitess/go/slice"
 	"vitess.io/vitess/go/vt/sqlparser"
 	"vitess.io/vitess/go/vt/vterrors"
 	"vitess.io/vitess/go/vt/vtgate/engine"
@@ -26,14 +27,12 @@ import (
 	"vitess.io/vitess/go/vt/vtgate/semantics"
 )
 
-// hasWindowFunctions checks if the query contains window functions
 func hasWindowFunctions(ctx *plancontext.PlanningContext) bool {
 	stmt, ok := ctx.Statement.(*sqlparser.Select)
 	if !ok {
 		return false
 	}
 
-	// Check if there's any OverClause in the entire statement
 	var hasWindow bool
 	err := sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
 		if _, ok := node.(*sqlparser.OverClause); ok {
@@ -48,26 +47,17 @@ func hasWindowFunctions(ctx *plancontext.PlanningContext) bool {
 	return hasWindow
 }
 
-// validateWindowFunctionsForMultiShard validates window functions for multi-shard operations
 func validateWindowFunctionsForMultiShard(ctx *plancontext.PlanningContext, op Operator, routes []*Route) error {
-	for _, route := range routes {
-		if !canExecuteWindowsOnRoute(route) {
-			return ctx.SemTable.NotSingleShardErr
-		}
-		if err := validateWindowPartitions(ctx, route); err != nil {
-			return err
-		}
-		if !canExecuteWindowsInSubqueries(ctx, route) {
-			return ctx.SemTable.NotSingleShardErr
-		}
-	}
-
 	if len(routes) > 0 {
+		for _, route := range routes {
+			if err := validateRouteForWindows(ctx, route); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
-	// Check subqueries in the main operator tree if no routes were found
-	// This handles cases where window functions are used in UNION ALL or other complex operators
+	// Handle cases where window functions are used in UNION ALL or other complex operators
 	if canExecuteWindowsInSubqueries(ctx, op) {
 		return nil
 	}
@@ -75,66 +65,70 @@ func validateWindowFunctionsForMultiShard(ctx *plancontext.PlanningContext, op O
 	return ctx.SemTable.NotSingleShardErr
 }
 
-// canExecuteWindowsOnRoute checks if window functions can execute on this route
+func validateRouteForWindows(ctx *plancontext.PlanningContext, route *Route) error {
+	if !canExecuteWindowsOnRoute(route) {
+		return ctx.SemTable.NotSingleShardErr
+	}
+	if err := validateWindowPartitions(ctx, route); err != nil {
+		return err
+	}
+	return nil
+}
+
 func canExecuteWindowsOnRoute(route *Route) bool {
 	if route == nil {
 		return false
 	}
 
-	opCode := route.Routing.OpCode()
-	// Allow window functions for specific opcodes that can handle them
-	if opCode == engine.IN || opCode == engine.EqualUnique || opCode == engine.Unsharded ||
-		opCode == engine.None || opCode == engine.DBA {
+	// Allow window functions for single-shard opcodes
+	if isSingleShardOpCode(route.Routing.OpCode()) {
 		return true
 	}
 
-	shardedRouting, ok := route.Routing.(*ShardedRouting)
-	if !ok {
-		// For other non-ShardedRouting types, window functions are not allowed
-		return false
-	}
-
-	if shardedRouting.Selected == nil {
-		return false
-	}
-
-	selectedVindex := shardedRouting.Selected.FoundVindex
-	if selectedVindex == nil || !selectedVindex.IsUnique() {
-		return false
-	}
-
-	return true
+	// For sharded routing, require a unique vindex
+	return hasUniqueSelectedVindex(route.Routing)
 }
 
-// validateWindowPartitions validates that PARTITION BY includes the sharding key for multi-shard operations
+func isSingleShardOpCode(opCode engine.Opcode) bool {
+	return opCode == engine.IN || opCode == engine.EqualUnique || opCode == engine.Unsharded ||
+		opCode == engine.None || opCode == engine.DBA
+}
+
+func hasUniqueSelectedVindex(routing Routing) bool {
+	shardedRouting, ok := routing.(*ShardedRouting)
+	if !ok || shardedRouting.Selected == nil || shardedRouting.Selected.FoundVindex == nil {
+		return false
+	}
+	return shardedRouting.Selected.FoundVindex.IsUnique()
+}
+
 func validateWindowPartitions(ctx *plancontext.PlanningContext, route *Route) error {
 	stmt, ok := ctx.Statement.(*sqlparser.Select)
 	if !ok {
 		return nil
 	}
 
-	shardingKey := findShardingKey(route)
-	if shardingKey == "" {
+	shardingColumns := findShardingColumns(route)
+	if len(shardingColumns) == 0 {
 		return nil
 	}
 
-	for _, selectExpr := range stmt.SelectExprs.Exprs {
-		if err := validateWindowPartitionBy(selectExpr, shardingKey); err != nil {
+	for _, expr := range stmt.SelectExprs.Exprs {
+		if err := validateWindowPartitionBy(expr, shardingColumns); err != nil {
 			return err
 		}
 	}
 
-	if err := validateNamedWindows(stmt.Windows, shardingKey); err != nil {
+	if err := validateNamedWindows(stmt.Windows, shardingColumns); err != nil {
 		return err
 	}
 
-	return validateSubqueryWindows(stmt, shardingKey)
+	return nil
 }
 
-// canExecuteWindowsInSubqueries checks if subqueries contain valid window functions
 func canExecuteWindowsInSubqueries(ctx *plancontext.PlanningContext, op Operator) bool {
 	if op == nil || ctx == nil {
-		return false
+		return true
 	}
 
 	hasInvalidSubquery := false
@@ -145,16 +139,13 @@ func canExecuteWindowsInSubqueries(ctx *plancontext.PlanningContext, op Operator
 		}
 
 		if subOp, ok := op.(*SubQuery); ok {
-			if subOp == nil || subOp.Subquery == nil {
-				hasInvalidSubquery = true
+			if subOp.Subquery == nil {
 				return op, NoRewrite
 			}
-			if subRoute, ok := subOp.Subquery.(*Route); ok && subRoute != nil {
-				if !canExecuteWindowsOnRoute(subRoute) || validateWindowPartitions(ctx, subRoute) != nil {
+			if subRoute, ok := subOp.Subquery.(*Route); ok {
+				if validateRouteForWindows(ctx, subRoute) != nil {
 					hasInvalidSubquery = true
 				}
-			} else {
-				hasInvalidSubquery = true
 			}
 		}
 		return op, NoRewrite
@@ -164,49 +155,29 @@ func canExecuteWindowsInSubqueries(ctx *plancontext.PlanningContext, op Operator
 	return !hasInvalidSubquery
 }
 
-// validateSubqueryWindows validates window functions in subqueries
-func validateSubqueryWindows(stmt *sqlparser.Select, shardingKey string) error {
-	if stmt.Where == nil {
+func findShardingColumns(route *Route) []string {
+	shardedRouting, ok := route.Routing.(*ShardedRouting)
+	if !ok {
 		return nil
 	}
 
-	return sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-		subq, ok := node.(*sqlparser.Subquery)
-		if !ok {
-			return true, nil
-		}
-		sel, ok := subq.Select.(*sqlparser.Select)
-		if !ok {
-			return true, nil
-		}
-		for _, selectExpr := range sel.SelectExprs.Exprs {
-			if err := validateWindowPartitionBy(selectExpr, shardingKey); err != nil {
-				return false, err
+	if shardedRouting.Selected != nil {
+		for _, vpp := range shardedRouting.VindexPreds {
+			if vpp.ColVindex.Vindex == shardedRouting.Selected.FoundVindex {
+				return slice.Map(vpp.ColVindex.Columns, func(col sqlparser.IdentifierCI) string {
+					return col.String()
+				})
 			}
 		}
-		return true, validateSubqueryWindows(sel, shardingKey)
-	}, stmt.Where)
-}
-
-// findShardingKey returns the sharding key from the route
-func findShardingKey(route *Route) string {
-	shardedRouting, ok := route.Routing.(*ShardedRouting)
-	if !ok || len(shardedRouting.VindexPreds) == 0 {
-		return ""
 	}
 
-	vpp := shardedRouting.VindexPreds[0]
-	if vpp.ColVindex != nil && len(vpp.ColVindex.Columns) > 0 {
-		return vpp.ColVindex.Columns[0].String()
-	}
-	return ""
+	return nil
 }
 
-// validateNamedWindows validates PARTITION BY clauses in WINDOW definitions
-func validateNamedWindows(windows []*sqlparser.NamedWindow, shardingKey string) error {
+func validateNamedWindows(windows []*sqlparser.NamedWindow, shardingColumns []string) error {
 	for _, namedWindow := range windows {
 		for _, windowDef := range namedWindow.Windows {
-			if err := validateWindowSpec(windowDef.WindowSpec, shardingKey); err != nil {
+			if err := validateWindowSpec(windowDef.WindowSpec, shardingColumns); err != nil {
 				return err
 			}
 		}
@@ -214,46 +185,55 @@ func validateNamedWindows(windows []*sqlparser.NamedWindow, shardingKey string) 
 	return nil
 }
 
-// validateWindowSpec validates PARTITION BY includes the sharding key
-func validateWindowSpec(spec *sqlparser.WindowSpecification, shardingKey string) error {
+func validateWindowSpec(spec *sqlparser.WindowSpecification, shardingColumns []string) error {
+	if len(shardingColumns) == 0 {
+		return nil
+	}
+
 	if spec == nil || len(spec.PartitionClause) == 0 {
-		return vterrors.VT12001("window function PARTITION BY must include the sharding key '" + shardingKey + "' for multi-shard queries")
+		return newPartitionByError(shardingColumns)
+	}
+
+	requiredColumns := make(map[string]bool, len(shardingColumns))
+	for _, shardingCol := range shardingColumns {
+		requiredColumns[strings.ToLower(shardingCol)] = true
 	}
 
 	for _, expr := range spec.PartitionClause {
 		col, ok := expr.(*sqlparser.ColName)
 		if !ok {
-			return vterrors.VT12001("window function PARTITION BY must include the sharding key '" + shardingKey + "' for multi-shard queries")
+			continue
 		}
-		if col.Name.EqualString(shardingKey) || strings.EqualFold(col.Name.String(), shardingKey) {
-			return nil
+		colName := strings.ToLower(col.Name.String())
+		if requiredColumns[colName] {
+			delete(requiredColumns, colName)
 		}
 	}
 
-	return vterrors.VT12001("window function PARTITION BY must include the sharding key '" + shardingKey + "' for multi-shard queries")
+	if len(requiredColumns) > 0 {
+		return newPartitionByError(shardingColumns)
+	}
+
+	return nil
 }
 
-// validateWindowPartitionBy validates window functions in SELECT expressions
-func validateWindowPartitionBy(selectExpr interface{}, shardingKey string) error {
-	if selectExpr == nil {
+func newPartitionByError(shardingColumns []string) error {
+	return vterrors.VT12001("window function PARTITION BY must include all sharding key columns " + strings.Join(shardingColumns, ", ") + " for multi-shard queries")
+}
+
+func validateWindowPartitionBy(expr interface{}, shardingColumns []string) error {
+	if expr == nil {
 		return nil
 	}
 
-	var validationErr error
-	err := sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
+	return sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
 		overClause, ok := node.(*sqlparser.OverClause)
 		if !ok {
 			return true, nil
 		}
-		if err := validateWindowSpec(overClause.WindowSpec, shardingKey); err != nil {
-			validationErr = err
-			return false, nil
+		if err := validateWindowSpec(overClause.WindowSpec, shardingColumns); err != nil {
+			return false, err
 		}
 		return true, nil
-	}, selectExpr.(sqlparser.SQLNode))
-
-	if err != nil {
-		return err
-	}
-	return validationErr
+	}, expr.(sqlparser.SQLNode))
 }
