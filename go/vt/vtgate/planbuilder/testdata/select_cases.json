@@ -6309,11 +6309,11 @@
   },
   {
     "comment": "Window function with composite vindex (multi-column) - PARTITION BY includes all sharding key columns",
-    "query": "SELECT cola, colb, column_c, RANK() OVER (PARTITION BY cola, colb ORDER BY column_c) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
+    "query": "SELECT cola, colb, colc, RANK() OVER (PARTITION BY cola, colb ORDER BY colc) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
     "plan": {
       "Type": "Passthrough",
       "QueryType": "SELECT",
-      "Original": "SELECT cola, colb, column_c, RANK() OVER (PARTITION BY cola, colb ORDER BY column_c) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
+      "Original": "SELECT cola, colb, colc, RANK() OVER (PARTITION BY cola, colb ORDER BY colc) as rnk FROM multicol_tbl WHERE cola = 'A' AND colb = 'B'",
       "Instructions": {
         "OperatorType": "Route",
         "Variant": "EqualUnique",
@@ -6321,8 +6321,8 @@
           "Name": "user",
           "Sharded": true
         },
-        "FieldQuery": "select cola, colb, column_c, rank() over ( partition by cola, colb order by column_c asc) as rnk from multicol_tbl where 1 != 1",
-        "Query": "select cola, colb, column_c, rank() over ( partition by cola, colb order by column_c asc) as rnk from multicol_tbl where cola = 'A' and colb = 'B'",
+        "FieldQuery": "select cola, colb, colc, rank() over ( partition by cola, colb order by colc asc) as rnk from multicol_tbl where 1 != 1",
+        "Query": "select cola, colb, colc, rank() over ( partition by cola, colb order by colc asc) as rnk from multicol_tbl where cola = 'A' and colb = 'B'",
         "Values": [
           "'A'",
           "'B'"
